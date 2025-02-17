@@ -14,7 +14,7 @@
 
 using namespace kittens;
 
-// Dropout mask functions remain unchanged
+// Dropout mask functions
 template <kittens::ducks::rv::all T>
 __device__ void dropout_mask(T &dst, float keep_prob) {
   unsigned long long seed = 0;
