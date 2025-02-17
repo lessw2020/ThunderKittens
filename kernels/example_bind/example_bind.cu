@@ -9,7 +9,7 @@ struct globals {
     dim3 block() { return dim3(in.cols); }
 };
 __global__ void copy_kernel(const __grid_constant__ globals g) {
-    if(threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("Hello, from inside the kernel!\n");
+    if(threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0) printf("Hello, from inside the kernel! Go TK! \n");
     g.out[{blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x}] = g.in[{blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x}];
 }
 void run_copy_kernel(globals g) {

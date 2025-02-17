@@ -1,0 +1,249 @@
+#include <iostream>
+#include <string>
+#include <fstream>
+
+#define ATTN_B 4
+#define ATTN_N 1024
+#define N_TILE_SIZE 1024  //  N / 2, since 2 workers. Num launches.
+#define N_PER_TILE 2
+#define ATTN_D 1024 // hardcoded into this kernel
+
+#define ITERS 10
+
+#define dropout_p 0.00
+#define test_with_intermediates 0
+
+#define CudaCheckError()    __cudaCheckError( __FILE__, __LINE__ )
+inline void __cudaCheckError( const char *file, const int line ) {
+    cudaError err = cudaGetLastError();
+    if ( cudaSuccess != err )
+    {
+        fprintf( stderr, "cudaCheckError() failed at %s:%i : %s\n",
+                 file, line, cudaGetErrorString( err ) );
+        exit( -1 );
+    }
+    // More careful checking. However, this will affect performance.
+    // Comment away if needed.
+    err = cudaDeviceSynchronize();
+    if( cudaSuccess != err )
+    {
+        fprintf( stderr, "cudaCheckError() with sync failed at %s:%i : %s\n",
+                 file, line, cudaGetErrorString( err ) );
+        exit( -1 );
+    }
+}
+
+int main(int argc, char **argv) {
+    std::cout << "Entered main!" << std::endl;
+
+    // create dummy variables that are the right size
+    constexpr int TOTAL_ELEMENTS_X = ATTN_B*ATTN_N*ATTN_D;
+    constexpr int TOTAL_ELEMENTS_O = ATTN_B*ATTN_N*ATTN_D;
+    constexpr int TOTAL_ELEMENTS_NORM_WEIGHT = ATTN_D;
+
+    float *x            = new float[TOTAL_ELEMENTS_X];
+    float *residual     = new float[TOTAL_ELEMENTS_X];
+    float *o_ref        = new float[TOTAL_ELEMENTS_O];
+    float *o_resid_ref  = new float[TOTAL_ELEMENTS_O];
+    bf16 *x_bf          = new bf16[TOTAL_ELEMENTS_X];
+    bf16 *residual_bf   = new bf16[TOTAL_ELEMENTS_X];
+    bf16 *o_bf          = new bf16[TOTAL_ELEMENTS_O];
+    bf16 *o_resid_bf    = new bf16[TOTAL_ELEMENTS_O];
+
+    float *o            = new float[TOTAL_ELEMENTS_O];
+    float *o_resid      = new float[TOTAL_ELEMENTS_O];
+
+    float *norm_weight   = new float[TOTAL_ELEMENTS_NORM_WEIGHT];
+    bf16 *norm_weight_bf = new bf16[TOTAL_ELEMENTS_NORM_WEIGHT];
+
+    // debug for RMS value
+    constexpr int TOTAL_ELEMENTS_RMS = ATTN_B*ATTN_N;
+    float *rms_ref = new float[TOTAL_ELEMENTS_RMS];
+    bf16 *rms_bf   = new bf16[TOTAL_ELEMENTS_RMS];
+    float *rms     = new float[TOTAL_ELEMENTS_RMS];
+
+    if(argc > 1) {
+        std::ifstream infile(argv[1]);
+
+        printf("Loading from %s\n", argv[1]);
+        std::cout << "Starting to enter!" << std::endl;
+        for(int i = 0; i < TOTAL_ELEMENTS_X; i++) {
+            infile >> x[i];
+        }
+        std::cout << "Finished loading X" << std::endl;
+        for(int i = 0; i < TOTAL_ELEMENTS_X; i++) {  infile >> residual[i];   }
+        std::cout << "Finished loading RESIDUAL" << std::endl;
+        for(int i = 0; i < TOTAL_ELEMENTS_O; i++) {
+            infile >> o_ref[i];
+        }
+        std::cout << "Finished loading O_REF" << std::endl;
+        for(int i = 0; i < TOTAL_ELEMENTS_X; i++) {  infile >> o_resid_ref[i];   }
+        std::cout << "Finished loading OUT_RESIDUAL" << std::endl;
+
+        for(int i = 0; i < TOTAL_ELEMENTS_NORM_WEIGHT; i++) {  infile >> norm_weight[i];   }
+        std::cout << "Finished loading NORM_WEIGHT" << std::endl;
+
+        // debug for RMS
+        for(int i = 0; i < TOTAL_ELEMENTS_RMS; i++) {
+            infile >> rms_ref[i];
+        }
+        std::cout << "Finished loading RMS_REF" << std::endl;
+
+        std::cout << "Finished loading file from " << argv[1] << "!" << std::endl;
+    }
+
+    // set the inputs
+    for(int i = 0; i < TOTAL_ELEMENTS_X; i++) {
+        x_bf[i] = __float2bfloat16(x[i % TOTAL_ELEMENTS_X]);
+        residual_bf[i] = __float2bfloat16(residual[i % TOTAL_ELEMENTS_X]);
+    }
+    for(int i = 0; i < TOTAL_ELEMENTS_NORM_WEIGHT; i++) {
+        norm_weight_bf[i] = __float2bfloat16(norm_weight[i]);
+    }
+
+    bf16 *d_x, *d_residual, *d_o, *d_o_resid;
+    cudaMalloc(&d_x, TOTAL_ELEMENTS_X * sizeof(bf16));
+    cudaMalloc(&d_residual, TOTAL_ELEMENTS_X * sizeof(bf16));
+    cudaMalloc(&d_o, TOTAL_ELEMENTS_O * sizeof(bf16));
+    cudaMalloc(&d_o_resid, TOTAL_ELEMENTS_O * sizeof(bf16));
+
+    cudaMemcpy(d_x, x_bf, TOTAL_ELEMENTS_X * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_residual, residual_bf, TOTAL_ELEMENTS_X * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_o, o_bf, TOTAL_ELEMENTS_O * sizeof(bf16), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_o_resid, o_resid_bf, TOTAL_ELEMENTS_O * sizeof(bf16), cudaMemcpyHostToDevice);
+
+    bf16 *d_norm_weight;
+    cudaMalloc(&d_norm_weight, TOTAL_ELEMENTS_NORM_WEIGHT * sizeof(bf16));
+    cudaMemcpy(d_norm_weight, norm_weight_bf, TOTAL_ELEMENTS_NORM_WEIGHT * sizeof(bf16), cudaMemcpyHostToDevice);
+
+    // debug for RMS
+    bf16 *d_rms;
+    cudaMalloc(&d_rms, TOTAL_ELEMENTS_RMS * sizeof(bf16));
+    cudaMemcpy(d_rms, rms_bf, TOTAL_ELEMENTS_RMS * sizeof(bf16), cudaMemcpyHostToDevice);
+
+    cudaDeviceSynchronize();
+    CudaCheckError();
+    std::cout << "Starting warmups\n";
+    for(int i = 0; i < ITERS; i++) {
+        dispatch_rmsnorm(
+            d_x,
+            d_residual,
+            d_norm_weight,
+            d_o,
+            d_o_resid,
+            dropout_p,
+            ATTN_B, ATTN_N
+        );
+    }
+    cudaDeviceSynchronize();
+    CudaCheckError();
+
+    std::cout << "Starting kernel\n";
+    cudaDeviceSynchronize();
+    CudaCheckError();
+    const auto start = std::chrono::high_resolution_clock::now();
+    for(int i = 0; i < ITERS; i++) {
+        dispatch_rmsnorm(
+            d_x,
+            d_residual,
+            d_norm_weight,
+            d_o,
+            d_o_resid,
+            dropout_p,
+            ATTN_B, ATTN_N
+        );
+    }
+    cudaDeviceSynchronize();
+    const auto finish = std::chrono::high_resolution_clock::now();
+    CudaCheckError();
+    std::cout << "Finished kernel\n";
+
+    // check correctness
+    cudaMemcpy(o_bf, d_o, TOTAL_ELEMENTS_O * sizeof(bf16), cudaMemcpyDeviceToHost);
+    for(int i = 0; i < TOTAL_ELEMENTS_O; i++) {
+        o[i] = __bfloat162float(o_bf[i]);
+        if (i < 5) { std::cout << o[i] << std::endl; }
+    }
+    bool good = true;
+    std::ofstream o_ref_file("printouts/o_ref.txt");
+    std::ofstream o_file("printouts/o.txt");
+    std::ofstream diff_file("printouts/diff.txt");
+    std::cout << "Total elements: " << TOTAL_ELEMENTS_O << std::endl;
+    std::cout << "Total unique elements: " << TOTAL_ELEMENTS_O << std::endl;
+    for(int i = 0; i < TOTAL_ELEMENTS_O; i++) {
+        float diff = o[i] - o_ref[i % TOTAL_ELEMENTS_O];
+        if(i < TOTAL_ELEMENTS_O) {
+            o_ref_file << o_ref[i % TOTAL_ELEMENTS_O] << ' ';
+            o_file << o[i] << ' ';
+            diff_file << diff << ' ';
+            if (i % 1024 == 1023) {
+                o_ref_file << std::endl;
+                o_file << std::endl;
+                diff_file << std::endl;
+            }
+        }
+        if(abs(diff) > 0.1 || isnan(diff)) {
+            if (good == true) {
+                printf("i: %d, %f\n", i, diff);
+            }
+            good = false;
+        }
+    }
+    if(good) std::cout << "Correct out :)\n";
+    else std::cout << "Incorrect out :(\n";
+
+    // o_resid
+    cudaMemcpy(o_resid_bf, d_o_resid, TOTAL_ELEMENTS_O * sizeof(bf16), cudaMemcpyDeviceToHost);
+    for(int i = 0; i < TOTAL_ELEMENTS_O; i++) { o_resid[i] = __bfloat162float(o_resid_bf[i]); }
+    bool good_resid = true;
+    std::ofstream o_resid_ref_file("printouts/resid_ref.txt");
+    std::ofstream o_resid_file("printouts/resid.txt");
+    std::ofstream resid_diff_file("printouts/resid_diff.txt");
+    std::cout << "Total elements: " << TOTAL_ELEMENTS_O << std::endl;
+    std::cout << "Total unique elements: " << TOTAL_ELEMENTS_O << std::endl;
+    for(int i = 0; i < TOTAL_ELEMENTS_O; i++) {
+        float resid_diff = o_resid[i] - o_resid_ref[i % TOTAL_ELEMENTS_O];
+        if(i < TOTAL_ELEMENTS_O) {
+            o_resid_ref_file << o_resid_ref[i % TOTAL_ELEMENTS_O] << ' ';
+            o_resid_file << o_resid[i] << ' ';
+            resid_diff_file << resid_diff << ' ';
+            if (i % 1024 == 1023) {
+                o_resid_ref_file << std::endl;
+                o_resid_file << std::endl;
+                resid_diff_file << std::endl;
+            }
+        }
+        if(abs(resid_diff) > 0.1 || isnan(resid_diff)) {
+            if (good_resid == true) {
+                printf("i: %d, %f\n", i, resid_diff);
+            }
+            good_resid = false;
+        }
+    }
+    if(good_resid) std::cout << "Correct out resid :)\n";
+    else std::cout << "Incorrect out resid :(\n";
+
+    std::cout << "Note it's difficult to get correctness with the dropout randomness. You can set dropout_p to 0 to test correctness exactly." << std::endl;
+    std::cout << "Average execution time: " << std::chrono::duration_cast<std::chrono::microseconds>(finish - start).count()/ITERS  << " us" << std::endl;
+
+    cudaFree(d_x);
+    cudaFree(d_residual);
+    cudaFree(d_o);
+    cudaFree(d_norm_weight);
+    cudaFree(d_rms);
+
+    delete[] x;
+    delete[] residual;
+    delete[] o;
+    delete[] o_ref;
+    delete[] norm_weight;
+    delete[] x_bf;
+    delete[] residual_bf;
+    delete[] o_bf;
+    delete[] norm_weight_bf;
+    delete[] rms;
+    delete[] rms_ref;
+    delete[] rms_bf;
+
+    return 0;
+}

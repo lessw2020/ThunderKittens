@@ -1,6 +1,6 @@
 # Compiler
 NVCC?=nvcc
-GPU=4090
+#GPU=4090
 
 TARGET=example_bind
 SRC=example_bind.cu

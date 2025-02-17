@@ -9,3 +9,8 @@
 *.ncu-rep
 __pycache__/
 */printouts/*
+*.o
+*.ninja
+*.egg
+build/
+*.so
