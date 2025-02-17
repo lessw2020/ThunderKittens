@@ -53,7 +53,7 @@ __device__ void dropout_mask(T &dst, float keep_prob) {
   mul(dst, dst, __float2bfloat16(1 / (1 - keep_prob)));
 }
 
-// Modified globals structure (removed mean-related components)
+//  globals structure
 template <int _d_model> struct norm_globals {
   static constexpr int d_model = _d_model;
   static constexpr int dropout_p = 0.0;
@@ -78,7 +78,7 @@ template <int _d_model> struct norm_globals {
   const int n_per_tile;
 };
 
-// Modified RMSNorm kernel
+// RMSNorm kernel
 template <int D>
 __global__ __launch_bounds__(NUM_THREADS, 1) void rmsnorm_tk(
     const __grid_constant__ norm_globals<D> g, int n_per_tile) {
@@ -153,7 +153,7 @@ __global__ __launch_bounds__(NUM_THREADS, 1) void rmsnorm_tk(
   }
 }
 
-// Modified dispatch function
+// dispatch function
 void dispatch_rmsnorm(bf16 *d_x_bf, bf16 *d_residual_bf, bf16 *d_norm_weight_bf,
                       bf16 *d_o, bf16 *d_o_resid, float dropout_p, int B,
                       int N) {
